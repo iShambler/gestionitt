@@ -1,0 +1,7 @@
+selenium
+webdriver-manager
+openai
+python-dotenv
+slack_bolt
+Flask
+python-dotenv
