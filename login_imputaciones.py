@@ -48,6 +48,7 @@ def crear_driver_headless():
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
+
 # ---------------------------------------------------------------------
 # FUNCIONES BASE
 # ---------------------------------------------------------------------
