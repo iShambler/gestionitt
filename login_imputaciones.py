@@ -4,6 +4,7 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options  # ✅ Import necesario
 from datetime import datetime, timedelta
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -28,6 +29,24 @@ BUSCADOR_BOTON_SELECTOR = '#buscar'
 
 # Crear cliente OpenAI con la clave del .env
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ---------------------------------------------------------------------
+# 🚀 CREAR DRIVER HEADLESS (nuevo para Render o servidores sin GUI)
+# ---------------------------------------------------------------------
+def crear_driver_headless():
+    """Crea un navegador Chrome en modo headless, ideal para Render o ejecución sin interfaz."""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")            # Ejecutar sin ventana
+    chrome_options.add_argument("--no-sandbox")              # Requerido por Render
+    chrome_options.add_argument("--disable-dev-shm-usage")   # Evita errores de memoria compartida
+    chrome_options.add_argument("--disable-gpu")             # Acelera en entornos sin GPU
+    chrome_options.add_argument("--window-size=1920,1080")   # Fija tamaño de pantalla virtual
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-extensions")
+    
+    service = ChromeService(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
 
 # ---------------------------------------------------------------------
 # FUNCIONES BASE
@@ -74,33 +93,63 @@ def seleccionar_fecha(driver, fecha_obj):
         "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12
     }
 
-    def obtener_mes_anio_actual():
-        texto = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, titulo_selector))).text.lower()
-        partes = texto.split()
-        mes_visible = meses[partes[0]]
-        anio_visible = int(partes[1])
-        return mes_visible, anio_visible
 
+    def obtener_mes_anio_actual():
+        """Obtiene el mes y año visibles actualmente en el calendario."""
+        try:
+            titulo = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, titulo_selector)))
+            texto = titulo.text.lower().strip()
+            partes = texto.split()
+
+            # Asegura que hay al menos dos partes (mes y año)
+            if len(partes) < 2:
+                raise ValueError(f"Formato inesperado del título del calendario: {texto}")
+
+            mes_visible = meses.get(partes[0], 1)
+            anio_visible = int(partes[1])
+
+            return mes_visible, anio_visible
+        except Exception as e:
+            print(f"⚠️ Error obteniendo mes/año actual: {e}")
+            return fecha_obj.month, fecha_obj.year
+
+    # 📆 Obtener mes/año actual
     mes_visible, anio_visible = obtener_mes_anio_actual()
 
+    # 🔁 Navegar hasta el mes/año correcto
     while (anio_visible, mes_visible) < (fecha_obj.year, fecha_obj.month):
-        driver.find_element(By.CSS_SELECTOR, ".ui-datepicker-next").click()
-        time.sleep(0.3)
-        mes_visible, anio_visible = obtener_mes_anio_actual()
+        try:
+            btn_next = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".ui-datepicker-next")))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_next)
+            btn_next.click()
+            time.sleep(0.4)
+            mes_visible, anio_visible = obtener_mes_anio_actual()
+        except Exception:
+            break
 
     while (anio_visible, mes_visible) > (fecha_obj.year, fecha_obj.month):
-        driver.find_element(By.CSS_SELECTOR, ".ui-datepicker-prev").click()
-        time.sleep(0.3)
-        mes_visible, anio_visible = obtener_mes_anio_actual()
+        try:
+            btn_prev = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".ui-datepicker-prev")))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_prev)
+            btn_prev.click()
+            time.sleep(0.4)
+            mes_visible, anio_visible = obtener_mes_anio_actual()
+        except Exception:
+            break
 
+    # 📅 Seleccionar el día
     dia_seleccionado = fecha_obj.day
     print(f"📅 Seleccionando {dia_seleccionado}/{fecha_obj.month}/{fecha_obj.year}")
 
     try:
-        driver.find_element(By.XPATH, f"//a[text()='{dia_seleccionado}']").click()
+        dia_xpath = f"//a[normalize-space(text())='{dia_seleccionado}']"
+        elemento_dia = wait.until(EC.element_to_be_clickable((By.XPATH, dia_xpath)))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elemento_dia)
+        elemento_dia.click()
         print(f"✅ Fecha seleccionada correctamente: {fecha_obj.strftime('%d/%m/%Y')}")
     except Exception as e:
         print(f"⚠️ No se pudo seleccionar el día {dia_seleccionado}: {e}")
+
 
 
 # ---------------------------------------------------------------------
@@ -122,13 +171,12 @@ def seleccionar_proyecto(driver, wait, nombre_proyecto):
                 texto = fila.text.lower()
                 if nombre_proyecto.lower() in texto:
                     print(f"🧩 Proyecto '{nombre_proyecto}' ya existe, reutilizando línea existente.")
-                    # hacemos click sobre la fila para activarla, por si es necesario
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", fila)
                     try:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", fila)
                         fila.click()
-                        time.sleep(0.5)
                     except Exception:
                         pass
+                    time.sleep(0.3)
                     return True
             return False
         except Exception as e:
@@ -143,13 +191,16 @@ def seleccionar_proyecto(driver, wait, nombre_proyecto):
         # 1️⃣ Pulsar en "Añadir Línea"
         print("🆕 Añadiendo nueva línea de imputación...")
         btn_nueva_linea = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#btNuevaLinea")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_nueva_linea)
         btn_nueva_linea.click()
         time.sleep(1)
 
         # 2️⃣ Pulsar en el botón "»" para abrir el buscador
         print("🔍 Abriendo buscador de proyectos...")
         btn_cambiar = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#btCambiarSubproyecto")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_cambiar)
         btn_cambiar.click()
+        time.sleep(0.8)
 
         # 3️⃣ Esperar a que aparezca el campo de búsqueda
         print("⌛ Esperando campo de búsqueda...")
@@ -160,18 +211,22 @@ def seleccionar_proyecto(driver, wait, nombre_proyecto):
         # 4️⃣ Pulsar en el botón "Buscar"
         print(f"🔎 Buscando proyecto: {nombre_proyecto}")
         btn_buscar = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#buscar")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_buscar)
         btn_buscar.click()
-        time.sleep(1.5)
+        time.sleep(1.2)
 
         # 5️⃣ Asegurar que el árbol se expanda completamente
         print("🌳 Expandiendo árbol de resultados...")
         driver.execute_script("""
-            var tree = $('#treeTipologia');
-            if (tree && tree.jstree) { tree.jstree('open_all'); }
+            const tree = document.querySelector('#treeTipologia');
+            if (tree && typeof $(tree).jstree === 'function') {
+                $(tree).jstree('open_all');
+            }
         """)
+
         time.sleep(1)
 
-        # 6️⃣ Buscar el enlace del proyecto en el árbol (insensible a mayúsculas y acentos)
+        # 6️⃣ Buscar y seleccionar el proyecto
         print("📂 Buscando y seleccionando el proyecto en el árbol...")
         xpath = (
             f"//li[@rel='subproyectos']//a[contains(translate(normalize-space(.), "
@@ -182,7 +237,6 @@ def seleccionar_proyecto(driver, wait, nombre_proyecto):
         elemento = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elemento)
         elemento.click()
-
         print(f"✅ Proyecto '{nombre_proyecto}' seleccionado correctamente.")
         time.sleep(1.5)
 
@@ -200,7 +254,6 @@ def imputar_horas_semana(driver, wait):
     """
     print("🕒 Imputando horas de lunes a viernes...")
 
-    # Mapa de horas por día
     horas_semana = {
         "h1": "8.5",  # Lunes
         "h2": "8.5",  # Martes
@@ -209,25 +262,28 @@ def imputar_horas_semana(driver, wait):
         "h5": "6.5",  # Viernes
     }
 
-    for i, (dia, valor) in enumerate(horas_semana.items()):
+    for dia, valor in horas_semana.items():
         try:
-            # Cada línea de imputación tiene índices como listaEmpleadoHoras[0].h1
             input_selector = f"input[id^='listaEmpleadoHoras'][id$='.{dia}']"
             campo = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, input_selector)))
 
-            # Si está visible y habilitado
+            # 🔍 Asegurar que el campo esté visible (headless no lo muestra por defecto)
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", campo)
+            time.sleep(0.1)
+
             if campo.is_enabled():
                 campo.clear()
                 campo.send_keys(valor)
                 print(f"✅ Día {dia.upper()} → {valor} horas")
                 time.sleep(0.3)
             else:
-                print(f"⚠️ Día {dia.upper()} no editable (posible festivo o bloqueo)")
+                print(f"⚠️ Día {dia.upper()} no editable (festivo o bloqueo)")
 
-        except Exception:
-            print(f"⚠️ Día {dia.upper()} no disponible (omitido)")
+        except Exception as e:
+            print(f"⚠️ Día {dia.upper()} no disponible (omitido): {e}")
 
     print("✅ Imputación semanal completada.")
+
 
 def imputar_horas_dia(driver, wait, dia, horas):
     """
@@ -252,8 +308,11 @@ def imputar_horas_dia(driver, wait, dia, horas):
         input_selector = f"input[id^='listaEmpleadoHoras'][id$='.{dia_clave}']"
         campo = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, input_selector)))
 
+        # 🔍 Scroll para asegurar visibilidad en headless
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", campo)
+        time.sleep(0.1)
+
         if campo.is_enabled():
-            # Leer el valor actual y sumarle las nuevas horas
             valor_actual = campo.get_attribute("value") or "0"
             try:
                 valor_actual = float(valor_actual.replace(",", "."))
@@ -277,16 +336,21 @@ def guardar_linea(driver, wait):
     """Pulsa el botón 'Guardar' tras imputar horas."""
     try:
         btn_guardar = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#btGuardarLinea")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_guardar)
+        time.sleep(0.1)
         btn_guardar.click()
         time.sleep(1.5)
         print("💾 Línea guardada correctamente.")
     except Exception as e:
         print(f"⚠️ No se pudo pulsar el botón Guardar: {e}")
 
+
 def emitir_linea(driver, wait):
     """Pulsa el botón 'Emitir' tras imputar horas."""
     try:
         btn_emitir = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#btEmitir")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_emitir)
+        time.sleep(0.1)
         btn_emitir.click()
         time.sleep(1.5)
         print("📤 Línea emitida correctamente.")
@@ -303,6 +367,8 @@ def iniciar_jornada(driver, wait):
 
     try:
         btn_inicio = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#botonInicioJornada")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_inicio)
+        time.sleep(0.1)
 
         if btn_inicio.is_enabled():
             btn_inicio.click()
@@ -314,6 +380,7 @@ def iniciar_jornada(driver, wait):
     except Exception as e:
         print(f"⚠️ No se pudo iniciar la jornada: {e}")
 
+
 def finalizar_jornada(driver, wait):
     """
     Pulsa el botón 'Finalizar jornada' si está disponible.
@@ -323,6 +390,8 @@ def finalizar_jornada(driver, wait):
 
     try:
         btn_fin = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#botonFinJornada")))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_fin)
+        time.sleep(0.1)
 
         if btn_fin.is_enabled():
             btn_fin.click()
@@ -336,9 +405,8 @@ def finalizar_jornada(driver, wait):
 
 
 
-
 # ---------------------------------------------------------------------
-# INTERPRETACIÓN REAL CON GPT
+# INTERPRETACIÓN REAL CON GPT (versión robusta para Render)
 # ---------------------------------------------------------------------
 def interpretar_con_gpt(texto):
     """
@@ -349,16 +417,18 @@ def interpretar_con_gpt(texto):
     - seleccionar_fecha (requiere 'fecha' en formato YYYY-MM-DD)
     - volver
     - seleccionar_proyecto (requiere 'nombre')
+    - imputar_horas_dia (requiere 'dia' y 'horas')
     - imputar_horas_semana
     - iniciar_jornada
+    - finalizar_jornada
 
     Reglas:
-    1. Siempre asume que el año es 2025, aunque el usuario no lo diga.
-    2. Si el usuario dice "esta semana", "la próxima", etc., genera la fecha del lunes de esa semana en 2025.
-    3. Si el usuario mezcla acciones (como "imputa horas en el proyecto X la semana del 7 de octubre"),
-       **primero debe ir la fecha**, luego el proyecto, y al final la imputación.
-    4. Devuelve SOLO una lista JSON válida (sin texto adicional).
-    5. Si no se puede interpretar algo, ignóralo.
+    1. Siempre asume que el año es 2025.
+    2. Si el usuario dice "esta semana", "la próxima", etc., genera el lunes de esa semana en 2025.
+    3. Si mezcla acciones ("imputa horas en el proyecto X la semana del 7 de octubre"),
+       el orden debe ser: fecha → proyecto → imputación → guardar/emitir → volver.
+    4. Devuelve SOLO JSON válido.
+    5. Si no se puede interpretar algo, se ignora.
     """
 
     prompt = f"""
@@ -376,87 +446,123 @@ Acciones válidas:
 
 Reglas:
 1️⃣ Siempre usa el año 2025 aunque el usuario no lo diga.
-- Si el usuario menciona varios proyectos y horas en la misma frase (por ejemplo
-  "3.5 en Desarrollo y 2 en Dirección el lunes"), genera varias acciones en orden:
-  seleccionar_proyecto → imputar_horas_dia → seleccionar_proyecto → imputar_horas_dia.
-- Si el usuario menciona palabras como "expide", "emite", "envía", "envíalo", "expídelo" o similares,
-  añade una acción {{"accion": "emitir_linea"}} al final de la secuencia.
-- Si no menciona ninguna de esas palabras, añade {{"accion": "guardar_linea"}} después de imputar horas.
-
-2️⃣ Si el usuario dice "esta semana", "la próxima semana", "la segunda de octubre", etc., genera el lunes de esa semana en 2025.
-3️⃣ Si la frase incluye varias acciones, ordénalas SIEMPRE así:
-   - seleccionar_fecha primero (si procede)
-   - luego seleccionar_proyecto
-   - luego imputar_horas_dia o imputar_horas_semana
-   - finalmente guardar_linea o emitir_linea (si aplica)
-
-❗ Solo incluye {{"accion": "iniciar_jornada"}} si el usuario dice explícitamente
-
-   frases como "inicia jornada", "empieza jornada", "comienza el día" o similares.
-
-4️⃣ Devuelve SOLO un JSON válido (nada de texto explicativo ni comentarios).
-5️⃣ Si algo no se entiende, omítelo.
-
+2️⃣ Si el usuario menciona varios proyectos y horas en la misma frase (por ejemplo
+   "3.5 en Desarrollo y 2 en Dirección el lunes"), genera varias acciones en orden:
+   seleccionar_proyecto → imputar_horas_dia → seleccionar_proyecto → imputar_horas_dia.
+3️⃣ Si el usuario menciona palabras como "expide", "emite", "envía", "envíalo", "expídelo" o similares,
+   añade una acción {{ "accion": "emitir_linea" }} al final de la secuencia.
+4️⃣ Si no menciona ninguna de esas palabras, añade {{ "accion": "guardar_linea" }} después de imputar horas.
+5️⃣ Si el usuario dice "esta semana", "la próxima semana", etc., genera el lunes correspondiente en 2025.
+6️⃣ Solo incluye {{ "accion": "iniciar_jornada" }} si el usuario dice explícitamente
+   "inicia jornada", "empieza jornada", "comienza el día", etc.
+7️⃣ Devuelve SOLO JSON válido, sin texto ni comentarios.
+8️⃣ Orden de las acciones:
+   seleccionar_fecha → seleccionar_proyecto → imputar_horas_dia → imputar_horas_semana → guardar/emitir → volver
 
 Ejemplo de salida correcta:
 [
-  {{"accion": "iniciar_jornada"}},
-  {{"accion": "seleccionar_fecha", "parametros": {{"fecha": "2025-10-06"}}}},
-  {{"accion": "seleccionar_proyecto", "parametros": {{"nombre": "Desarrollo"}}}},
-  {{"accion": "imputar_horas_semana"}}
+  {{ "accion": "iniciar_jornada" }},
+  {{ "accion": "seleccionar_fecha", "parametros": {{ "fecha": "2025-10-06" }} }},
+  {{ "accion": "seleccionar_proyecto", "parametros": {{ "nombre": "Desarrollo" }} }},
+  {{ "accion": "imputar_horas_semana" }}
 ]
 
 Frase del usuario: "{texto}"
 """
 
-
     try:
+        # 🔁 Solicitud al modelo
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Eres un traductor de lenguaje natural a comandos JSON."},
+                {"role": "system", "content": "Eres un traductor de lenguaje natural a comandos JSON válidos."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0
+            temperature=0,
         )
 
         raw = response.choices[0].message.content.strip()
-        data = json.loads(raw)
+        print("🧠 [DEBUG GPT] Respuesta cruda:", raw)
 
-        # Si devuelve un solo objeto, lo convertimos a lista
+        # 🧩 Limpieza preventiva de texto extraño
+        raw = raw.strip("` \n\t")
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+
+        # A veces el modelo devuelve texto rodeado de ```json ... ```
+        if raw.startswith("```"):
+            raw = raw.strip("```").replace("json", "").strip()
+
+        # Intentar parsear JSON
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print("⚠️ Error al decodificar JSON:", e)
+            print("🔍 Contenido problemático:", raw)
+            return []
+
+        # Aceptar tanto lista como dict
         if isinstance(data, dict):
             data = [data]
 
-        # 🧠 Reordenar acciones: fecha → proyecto → imputación
-        orden_correcto = ["seleccionar_fecha", "seleccionar_proyecto",   "imputar_horas_dia", "imputar_horas_semana", "volver"]
-        data = sorted(data, key=lambda x: orden_correcto.index(x["accion"]) if x["accion"] in orden_correcto else 99)
+        # 🔧 Reordenar acciones en orden lógico
+        orden_correcto = [
+            "iniciar_jornada",
+            "seleccionar_fecha",
+            "seleccionar_proyecto",
+            "imputar_horas_dia",
+            "imputar_horas_semana",
+            "guardar_linea",
+            "emitir_linea",
+            "finalizar_jornada",
+            "volver"
+        ]
+        data = sorted(
+            data,
+            key=lambda x: orden_correcto.index(x["accion"])
+            if x.get("accion") in orden_correcto else 99
+        )
 
+        print("✅ [DEBUG GPT] Interpretación final:", data)
         return data
 
     except Exception as e:
-        print("⚠️ Error interpretando respuesta del modelo:", e)
+        print("❌ Error interpretando respuesta del modelo:", e)
         return []
 
 
+
 # ---------------------------------------------------------------------
-# EJECUTAR ACCIÓN
+# EJECUTAR ACCIÓN (versión robusta para Render / headless)
 # ---------------------------------------------------------------------
 def ejecutar_accion(driver, wait, orden):
+    """Ejecuta una acción interpretada del GPT con control de errores y logs claros."""
     accion = orden.get("accion")
 
-    # 🕒 PRIMERO: iniciar jornada
-    if accion == "iniciar_jornada":
-        iniciar_jornada(driver, wait)
-    
-    # 🕓 Finalizar jornada
-    elif accion == "finalizar_jornada":
-        finalizar_jornada(driver, wait)
-    elif accion == "imputar_horas_dia":
-        try:
-            dia_param = orden["parametros"].get("dia")
-            horas = float(orden["parametros"].get("horas"))
+    if not accion:
+        print(f"⚠️ Orden inválida o sin campo 'accion': {orden}")
+        return
 
-            # Si GPT devuelve una fecha completa, la convertimos a nombre de día (lunes, martes, etc.)
+    print(f"🚀 Ejecutando acción → {accion}")
+
+    try:
+        # 🕒 Iniciar jornada
+        if accion == "iniciar_jornada":
+            iniciar_jornada(driver, wait)
+
+        # 🕓 Finalizar jornada
+        elif accion == "finalizar_jornada":
+            finalizar_jornada(driver, wait)
+
+        # 🧮 Imputar horas de un día
+        elif accion == "imputar_horas_dia":
+            dia_param = orden.get("parametros", {}).get("dia")
+            horas = float(orden.get("parametros", {}).get("horas", 0))
+            if not dia_param:
+                print("⚠️ No se especificó el día en imputar_horas_dia.")
+                return
+
+            # Convertir fecha completa a nombre de día si aplica
             try:
                 fecha_obj = datetime.fromisoformat(dia_param)
                 dia = fecha_obj.strftime("%A").lower()
@@ -465,90 +571,111 @@ def ejecutar_accion(driver, wait, orden):
                     "tuesday": "martes",
                     "wednesday": "miércoles",
                     "thursday": "jueves",
-                    "friday": "viernes"
+                    "friday": "viernes",
                 }
                 dia = dias_map.get(dia, dia)
             except Exception:
-                # Si ya era texto tipo 'lunes', lo usamos directamente
                 dia = dia_param.lower()
 
             imputar_horas_dia(driver, wait, dia, horas)
 
-        except Exception as e:
-            print(f"❌ Error al imputar horas del día: {e}")
+        # 📅 Seleccionar fecha
+        elif accion == "seleccionar_fecha":
+            fecha_str = orden.get("parametros", {}).get("fecha")
+            if not fecha_str:
+                print("⚠️ No se especificó fecha en seleccionar_fecha.")
+                return
 
-    # 📅 Seleccionar fecha
-    elif accion == "seleccionar_fecha":
-        try:
-            fecha = datetime.fromisoformat(orden["parametros"]["fecha"])
-            seleccionar_fecha(driver, fecha)
-        except Exception as e:
-            print("❌ No se pudo procesar la fecha:", e)
+            try:
+                fecha = datetime.fromisoformat(fecha_str)
+                seleccionar_fecha(driver, fecha)
+            except Exception as e:
+                print(f"❌ No se pudo procesar la fecha '{fecha_str}': {e}")
 
-    # ↩️ Volver a la pantalla principal
-    elif accion == "volver":
-        volver_inicio(driver)
+        # ↩️ Volver
+        elif accion == "volver":
+            volver_inicio(driver)
 
-    # 📂 Seleccionar proyecto
-    elif accion == "seleccionar_proyecto":
-        nombre = orden["parametros"].get("nombre")
-        seleccionar_proyecto(driver, wait, nombre)
+        # 📂 Seleccionar proyecto
+        elif accion == "seleccionar_proyecto":
+            nombre = orden.get("parametros", {}).get("nombre")
+            if not nombre:
+                print("⚠️ No se especificó el nombre del proyecto.")
+                return
+            seleccionar_proyecto(driver, wait, nombre)
 
-    # ⏱️ Imputar horas de la semana
-    elif accion == "imputar_horas_semana":
-        imputar_horas_semana(driver, wait)
+        # ⏱️ Imputar horas semanales
+        elif accion == "imputar_horas_semana":
+            imputar_horas_semana(driver, wait)
 
-        # 💾 Guardar línea de imputación
-    elif accion == "guardar_linea":
-        guardar_linea(driver, wait)
+        # 💾 Guardar línea
+        elif accion == "guardar_linea":
+            guardar_linea(driver, wait)
 
-    # 📤 Emitir línea de imputación
-    elif accion == "emitir_linea":
-        emitir_linea(driver, wait)
+        # 📤 Emitir línea
+        elif accion == "emitir_linea":
+            emitir_linea(driver, wait)
 
-    # ❓ Acción desconocida
-    else:
-        print("🤔 No entiendo la instrucción o no está implementada todavía.")
+        else:
+            print(f"🤔 Acción desconocida o no implementada: {accion}")
+
+    except Exception as e:
+        print(f"❌ Error ejecutando '{accion}': {e}")
 
 
 # ---------------------------------------------------------------------
-# MAIN LOOP
+# MAIN LOOP (adaptado para Render/headless)
 # ---------------------------------------------------------------------
 def main():
-    service = ChromeService(ChromeDriverManager().install())
-    options = webdriver.ChromeOptions()
-    driver = webdriver.Chrome(service=service, options=options)
-    wait = WebDriverWait(driver, 15)
-
-    # 🚀 Login automático al inicio
-    hacer_login(driver, wait)
-
-    print("\n🧠 Asistente con IA (OpenAI) para imputación de horas")
-    print("Ya estás logueado en el sistema.")
-    print("Puedes decir cosas como:")
-    print(" - 'selecciona la semana del 7 de octubre'")
-    print(" - 'abre el proyecto Estudio/Investigación de tecnología o proyecto cliente'")
-    print(" - 'vuelve a la pantalla principal'")
-    print("Escribe 'salir' para terminar.\n")
+    """Inicializa el navegador (headless en Render), hace login y ejecuta comandos."""
+    print("🚀 Iniciando asistente de imputación de horas con GPT + Selenium...")
 
     try:
+        driver = crear_driver_headless()  # ✅ usa la función headless definida antes
+        wait = WebDriverWait(driver, 15)
+
+        # 🚀 Login automático
+        hacer_login(driver, wait)
+
+        print("\n🧠 Asistente con IA (OpenAI) para imputación de horas")
+        print("Ya estás logueado en el sistema.")
+        print("Puedes decir cosas como:")
+        print(" - 'selecciona la semana del 7 de octubre'")
+        print(" - 'abre el proyecto Estudio/Investigación de tecnología'")
+        print(" - 'vuelve a la pantalla principal'")
+        print("Escribe 'salir' para terminar.\n")
+
         while True:
-            texto = input("🗣️  > ")
+            try:
+                texto = input("🗣️  > ")
+            except EOFError:
+                # Render o ejecución sin stdin
+                print("ℹ️ Entorno sin entrada interactiva. Finalizando.")
+                break
+
             if texto.lower() in ["salir", "exit", "quit"]:
                 break
 
+            # 🧠 Interpretar instrucción con GPT
             ordenes = interpretar_con_gpt(texto)
             print("🧾 Interpretación:", ordenes)
 
-            # 🔄 Reordenar: siempre primero la fecha, luego el resto
-            ordenes = sorted(ordenes, key=lambda o: 0 if o["accion"] == "seleccionar_fecha" else 1)
+            # 🔄 Ordenar: siempre primero la fecha
+            ordenes = sorted(ordenes, key=lambda o: 0 if o.get("accion") == "seleccionar_fecha" else 1)
 
+            # Ejecutar cada acción interpretada
             for orden in ordenes:
                 ejecutar_accion(driver, wait, orden)
-    finally:
-        driver.quit()
-        print("🔚 Navegador cerrado.")
 
-# ---------------------------------------------------------------------
+    except Exception as e:
+        print(f"💥 Error crítico en main(): {e}")
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        print("🔚 Navegador cerrado correctamente.")
+        
 if __name__ == "__main__":
     main()

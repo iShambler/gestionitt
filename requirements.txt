@@ -1,7 +1,11 @@
+# --- Dependencias principales ---
 selenium
 webdriver-manager
 openai
 python-dotenv
+
+# --- Slack bot ---
 slack_bolt
-Flask
-python-dotenv
+
+# --- Chrome / Headless (Render) ---
+chromedriver-autoinstaller
